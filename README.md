@@ -24,6 +24,7 @@ pythonw notes.pyw
 - Notes list on the left, newest edits first; give notes a title, or they use their first line
 - Search matches every word you type, in any order, across titles and note text (case-insensitive)
 - Delete asks for confirmation
+- Ctrl+Shift+V toggles a note between editing and a rendered Markdown preview (headings, lists, tasks, tables, code, quotes, links); each note remembers its view
 - Remembers window size and last open note
 - Single instance: launching again focuses the open window
 
@@ -36,6 +37,7 @@ pythonw notes.pyw
 | Right-click note | Rename / Delete menu |
 | Ctrl+F | Search (Esc clears, Enter jumps to editor) |
 | Ctrl+Backspace / Ctrl+Delete | Delete previous / next word |
+| Ctrl+Shift+V | Toggle Markdown preview for current note |
 | Ctrl+Shift+Delete | Delete current note |
 | Delete | Delete selected note (when list is focused) |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
