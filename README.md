@@ -45,3 +45,5 @@ pythonw notes.pyw
 ## Data
 
 Stored in `%APPDATA%\SimpleNotes\notes.json`. Writes are atomic, so a crash can't corrupt the file. If the file ever becomes unreadable, it's moved aside as `notes.corrupt-<timestamp>.json` rather than overwritten.
+
+Change to force a push
