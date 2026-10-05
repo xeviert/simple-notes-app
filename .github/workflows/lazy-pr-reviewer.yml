@@ -1,0 +1,26 @@
+name: Lazy PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  checks: write
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: lazy-pr-reviewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  explain:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # needed to diff against the merge base
+      - uses: xeviert/lazy-pr-reviewer@files-tab-notes
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}

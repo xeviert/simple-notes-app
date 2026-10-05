@@ -6,6 +6,7 @@ import sys
 import tkinter as tk
 import tkinter.font as tkfont
 import uuid
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -22,10 +23,33 @@ TEXT_FG = "#1b1b1b"
 MUTED_FG = "#6b6b6b"
 SELECTED_BG = "#dce9f7"
 TEXT_SELECT_BG = "#cce4f7"
+CODE_BG = "#f4f4f4"
+LINK_FG = "#0b62c4"
+RULE_FG = "#d0d0d0"
 
 # A word, or a run of punctuation, plus the whitespace separating it from the cursor.
 WORD_BEFORE = re.compile(r"(?:\w+|[^\w\s]+)?\s*$")
 WORD_AFTER = re.compile(r"\s*(?:\w+|[^\w\s]+)?")
+
+FENCE = re.compile(r"^(\s*)(```|~~~)")
+HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
+RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
+LIST_ITEM = re.compile(r"^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$")
+TASK = re.compile(r"^\[([ xX])\]\s+")
+QUOTE = re.compile(r"^\s{0,3}>\s?(.*)$")
+TABLE_SEP = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
+INLINE = re.compile(
+    r"`(?P<code>[^`]+)`"
+    r"|!\[(?P<img>[^\]]*)\]\([^)]*\)"
+    r"|\[(?P<link>[^\]]+)\]\((?P<url>[^)\s]*)[^)]*\)"
+    r"|\*\*\*(?P<bi>\S.*?)\*\*\*"
+    r"|\*\*(?P<b>\S.*?)\*\*|\b__(?P<b2>\S.*?)__\b"
+    r"|\*(?P<i>[^\s*](?:.*?[^\s*])?)\*|\b_(?P<i2>\S.*?)_\b"
+    r"|~~(?P<strike>.+?)~~"
+)
+INLINE_STYLES = {"bi": {"b", "i"}, "b": {"b"}, "b2": {"b"}, "i": {"i"}, "i2": {"i"}, "strike": {"strike"}}
+# Only open web links; os.startfile (used by webbrowser on Windows) would run local files.
+SAFE_URL = re.compile(r"(?i)(https?|mailto):")
 
 
 def now():
@@ -65,6 +89,152 @@ def delete_word(event, backward):
         else:
             widget.delete(pos, pos + len(WORD_AFTER.match(text[pos:]).group()))
     return "break"
+
+
+def style_tags(styles):
+    tags = ["strike"] if "strike" in styles else []
+    if "b" in styles or "i" in styles:
+        tags.append("b" * ("b" in styles) + "i" * ("i" in styles))
+    return tuple(tags)
+
+
+def plain(text):
+    return INLINE.sub(lambda m: next(v for v in m.groupdict().values() if v is not None), text)
+
+
+def render_markdown(widget, source):
+    """Render common Markdown into a Text widget, using the tags from NotesApp.setup_preview_tags."""
+    widget.configure(state=tk.NORMAL)
+    widget.delete("1.0", tk.END)
+    for tag in widget.tag_names():
+        if tag.startswith("url-"):
+            widget.tag_delete(tag)
+    links = []
+    pending = []  # [prefix, text, tags] of the paragraph, list item or quote still collecting lines
+    list_indents = []
+
+    def inline(text, tags, styles=frozenset()):
+        pos = 0
+        for m in INLINE.finditer(text):
+            widget.insert(tk.END, text[pos:m.start()], tags + style_tags(styles))
+            pos = m.end()
+            kind, value = next((k, v) for k, v in m.groupdict().items() if v is not None)
+            if kind == "code":
+                widget.insert(tk.END, value, tags + ("code",))
+            elif kind == "img":
+                inline(value, tags, styles)
+            elif kind == "link" and SAFE_URL.match(m.group("url")):
+                name = f"url-{len(links)}"
+                links.append(m.group("url"))
+                widget.tag_bind(name, "<Button-1>", lambda _e, url=links[-1]: webbrowser.open(url))
+                inline(value, tags + ("link", name), styles)
+            elif kind == "link":
+                inline(value, tags, styles)
+            else:
+                inline(value, tags, styles | INLINE_STYLES[kind])
+        widget.insert(tk.END, text[pos:], tags + style_tags(styles))
+
+    def flush():
+        if pending:
+            prefix, text, tags = pending
+            widget.insert(tk.END, prefix, tags)
+            inline(text, tags)
+            widget.insert(tk.END, "\n", tags)
+            pending.clear()
+
+    lines = source.expandtabs(4).split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if not line.strip():
+            flush()
+            continue
+
+        if m := FENCE.match(line):
+            flush()
+            indent, fence = len(m.group(1)), m.group(2)
+            code = []
+            while i < len(lines) and not lines[i].lstrip().startswith(fence):
+                code.append(lines[i][min(indent, len(lines[i]) - len(lines[i].lstrip())):])
+                i += 1
+            i += 1
+            widget.insert(tk.END, "\n", ("code_block", "gap"))
+            widget.insert(tk.END, "\n".join(code) + "\n", "code_block")
+            widget.insert(tk.END, "\n", ("code_block", "gap"))
+            widget.insert(tk.END, "\n", "gap")
+            continue
+
+        if m := HEADING.match(line):
+            flush()
+            list_indents.clear()
+            tag = f"h{min(len(m.group(1)), 3)}"
+            inline(m.group(2), (tag,))
+            widget.insert(tk.END, "\n", tag)
+            continue
+
+        if RULE.match(line):
+            flush()
+            list_indents.clear()
+            widget.insert(tk.END, "─" * 400 + "\n", "rule")
+            continue
+
+        if "|" in line and i < len(lines) and "|" in lines[i] and TABLE_SEP.match(lines[i]):
+            flush()
+            list_indents.clear()
+            rows = [line]
+            i += 1
+            while i < len(lines) and "|" in lines[i]:
+                rows.append(lines[i])
+                i += 1
+            rows = [[plain(cell.strip()) for cell in row.strip().strip("|").split("|")] for row in rows]
+            cols = max(map(len, rows))
+            rows = [row + [""] * (cols - len(row)) for row in rows]
+            widths = [max(len(row[c]) for row in rows) for c in range(cols)]
+            for n, row in enumerate(rows):
+                cells = " │ ".join(cell.ljust(w) for cell, w in zip(row, widths))
+                widget.insert(tk.END, cells + "\n", ("table", "table_head") if n == 0 else "table")
+                if n == 0:
+                    widget.insert(tk.END, "─┼─".join("─" * w for w in widths) + "\n", "table")
+            widget.insert(tk.END, "\n", "gap")
+            continue
+
+        if m := QUOTE.match(line):
+            if not m.group(1).strip():
+                flush()
+            elif pending and pending[2] == ("quote",):
+                pending[1] += " " + m.group(1).strip()
+            else:
+                flush()
+                pending[:] = ["", m.group(1).strip(), ("quote",)]
+            continue
+
+        if m := LIST_ITEM.match(line):
+            flush()
+            indent = len(m.group(1))
+            while list_indents and indent < list_indents[-1]:
+                list_indents.pop()
+            if not list_indents or indent > list_indents[-1]:
+                list_indents.append(indent)
+            level = min(len(list_indents), 6) - 1
+            marker, text = m.group(2), m.group(3)
+            if task := TASK.match(text):
+                marker, text = "☐" if task.group(1) == " " else "☑", text[task.end():]
+            elif not marker[0].isdigit():
+                marker = "•◦▪"[level % 3]
+            pending[:] = [marker + "\t", text, (f"li{level}",)]
+            continue
+
+        if pending:
+            pending[1] += " " + line.strip()
+        elif list_indents and line[0] == " ":
+            level = min(len(list_indents), 6) - 1
+            pending[:] = ["\t", line.strip(), (f"li{level}",)]
+        else:
+            list_indents.clear()
+            pending[:] = ["", line.strip(), ("p",)]
+    flush()
+    widget.configure(state=tk.DISABLED)
 
 
 class NotesStore:
@@ -168,7 +338,7 @@ class NotesApp(tk.Tk):
         self.search = ttk.Entry(left, textvariable=self.search_var, font=self.ui_font)
         self.search.pack(fill=tk.X, pady=(2, 8), ipady=2)
         self.search.bind("<Escape>", lambda _e: self.search_var.set(""))
-        self.search.bind("<Return>", lambda _e: self.text.focus_set())
+        self.search.bind("<Return>", lambda _e: self.view().focus_set())
 
         buttons = ttk.Frame(left, style="Sidebar.TFrame")
         buttons.pack(side=tk.BOTTOM, fill=tk.X, pady=(8, 0))
@@ -190,18 +360,58 @@ class NotesApp(tk.Tk):
         self.menu.add_command(label="Delete", command=self.delete_note)
 
         right = ttk.Frame(paned, style="Editor.TFrame")
-        self.text = tk.Text(
-            right, wrap=tk.WORD, undo=True, font=self.editor_font, padx=28, pady=22,
+        text_options = dict(
+            wrap=tk.WORD, font=self.editor_font, padx=28, pady=22,
             background=EDITOR_BG, foreground=TEXT_FG, insertbackground=TEXT_FG,
             selectbackground=TEXT_SELECT_BG, selectforeground=TEXT_FG, inactiveselectbackground=TEXT_SELECT_BG,
             borderwidth=0, highlightthickness=0, spacing1=2, spacing3=2,
         )
-        scroll = ttk.Scrollbar(right, command=self.text.yview)
-        self.text.configure(yscrollcommand=scroll.set)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.text = tk.Text(right, undo=True, **text_options)
+        self.preview = tk.Text(right, state=tk.DISABLED, **text_options)
+        # A disabled Text ignores clicks for focus, which Ctrl+C needs.
+        self.preview.bind("<Button-1>", lambda _e: self.preview.focus_set())
+        self.setup_preview_tags()
+        self.scroll = ttk.Scrollbar(right, command=self.text.yview)
+        self.text.configure(yscrollcommand=self.scroll.set)
+        self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.text.pack(fill=tk.BOTH, expand=True)
         self.text.bind("<<Modified>>", self.on_edit)
         paned.add(right, weight=3)
+
+    def setup_preview_tags(self):
+        family, size = self.editor_font.cget("family"), self.editor_font.cget("size")
+        mono = pick_font("Cascadia Mono", "Consolas", "Courier New")
+        tags = {
+            "p": dict(spacing3="6p"),
+            "quote": dict(lmargin1="14p", lmargin2="14p", foreground=MUTED_FG, spacing3="6p"),
+            "strike": dict(overstrike=True),
+            "link": dict(foreground=LINK_FG, underline=True),
+            "b": dict(font=(family, size, "bold")),
+            "i": dict(font=(family, size, "italic")),
+            "bi": dict(font=(family, size, "bold", "italic")),
+            # Defined after the inline styles so these fonts win over bold/italic.
+            "h1": dict(font=(family, 20, "bold"), spacing1="14p", spacing3="6p"),
+            "h2": dict(font=(family, 16, "bold"), spacing1="12p", spacing3="4p"),
+            "h3": dict(font=(family, 13, "bold"), spacing1="10p", spacing3="4p"),
+            "code": dict(font=(mono, size - 1), background=CODE_BG),
+            "code_block": dict(
+                font=(mono, size - 1), background=CODE_BG, lmargin1="10p", lmargin2="10p",
+                lmargincolor=CODE_BG, spacing1=0, spacing3=0,
+            ),
+            "table": dict(font=(mono, size - 1), spacing1=0, spacing3=0),
+            "table_head": dict(font=(mono, size - 1, "bold")),
+            "rule": dict(font=(family, 6), foreground=RULE_FG, wrap=tk.NONE, spacing1="6p", spacing3="6p"),
+            "gap": dict(font=(family, 4), spacing1=0, spacing3=0),
+        }
+        for level in range(6):
+            indent = 4 + level * 22
+            tags[f"li{level}"] = dict(
+                lmargin1=f"{indent}p", lmargin2=f"{indent + 22}p", tabs=f"{indent + 22}p", spacing3="2p",
+            )
+        for tag, options in tags.items():
+            self.preview.tag_configure(tag, **options)
+        self.preview.tag_bind("link", "<Enter>", lambda _e: self.preview.configure(cursor="hand2"))
+        self.preview.tag_bind("link", "<Leave>", lambda _e: self.preview.configure(cursor="xterm"))
 
     def bind_keys(self):
         for widget_class in ("Text", "TEntry"):
@@ -211,12 +421,15 @@ class NotesApp(tk.Tk):
         for seq, handler in (
             ("<Control-n>", self.new_note), ("<Control-N>", self.new_note),
             ("<Control-f>", self.focus_search), ("<Control-F>", self.focus_search),
+            # Lowercase variant is what Shift gives while Caps Lock is on.
+            ("<Control-Shift-V>", self.toggle_preview), ("<Control-Shift-v>", self.toggle_preview),
         ):
             self.bind_all(seq, handler)
             # Instance binding runs before Text's class bindings, so "break" overrides them.
             self.text.bind(seq, handler)
+            self.preview.bind(seq, handler)
         # Bound per widget so it wins over the Ctrl+Delete word binding above.
-        for widget in (self.text, self.search, self.tree):
+        for widget in (self.text, self.preview, self.search, self.tree):
             widget.bind("<Control-Shift-Delete>", self.delete_note)
 
     def find(self, note_id):
@@ -241,6 +454,8 @@ class NotesApp(tk.Tk):
         else:
             modified = datetime.fromisoformat(self.current["modified"]).strftime("%b %d, %Y %I:%M %p")
             text = f"Edited {modified}   ·   {count}"
+            if self.current.get("preview"):
+                text += "   ·   Markdown preview (Ctrl+Shift+V to edit)"
         self.status.configure(text=f"{text}   ·   {extra}" if extra else text)
 
     def open_note(self, note):
@@ -251,6 +466,7 @@ class NotesApp(tk.Tk):
         self.text.mark_set(tk.INSERT, "1.0")
         self.text.edit_reset()
         self.text.edit_modified(False)
+        self.show_view()
         self.refresh_list()
         self.update_status()
 
@@ -260,8 +476,38 @@ class NotesApp(tk.Tk):
         self.text.edit_reset()
         self.text.edit_modified(False)
         self.text.configure(state=tk.DISABLED)
+        self.show_view()
         self.refresh_list()
         self.update_status()
+
+    def view(self):
+        return self.preview if self.current and self.current.get("preview") else self.text
+
+    def show_view(self, top=0.0):
+        shown = self.view()
+        hidden = self.text if shown is self.preview else self.preview
+        if shown is self.preview:
+            render_markdown(self.preview, self.current["body"])
+        had_focus = self.focus_get() is hidden
+        hidden.pack_forget()
+        hidden.configure(yscrollcommand="")
+        shown.configure(yscrollcommand=self.scroll.set)
+        self.scroll.configure(command=shown.yview)
+        shown.pack(fill=tk.BOTH, expand=True)
+        shown.yview_moveto(top)
+        if had_focus:
+            shown.focus_set()
+
+    def toggle_preview(self, _event=None):
+        if self.current is None:
+            return "break"
+        top = self.view().yview()[0]
+        self.current["preview"] = not self.current.get("preview")
+        self.show_view(top)
+        self.view().focus_set()
+        self.update_status()
+        self.schedule_save()
+        return "break"
 
     def on_select(self, _event=None):
         selection = self.tree.selection()
@@ -327,7 +573,7 @@ class NotesApp(tk.Tk):
                 note["modified"] = now()
             entry.destroy()
             self.save_now()
-            self.text.focus_set()
+            self.view().focus_set()
 
         entry.bind("<Return>", lambda _e: finish(True))
         entry.bind("<KP_Enter>", lambda _e: finish(True))
